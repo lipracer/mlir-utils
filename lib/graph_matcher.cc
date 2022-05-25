@@ -34,26 +34,36 @@ struct ValueWrapper {
 
 // it is binary tree, we just recursion collect
 // leaf node is not commutative and not null
-void getBinaryTreeLeaf(void* class_id, mlir::Operation* root,
+void getBinaryTreeLeaf(mlir::Value root,
                        llvm::SmallVectorImpl<mlir::Value>& leafNodes,
-                       std::function<void(mlir::Operation*)> callback = {}) {
-  if (!root) return;
-  if (callback) callback(root);
-  for (auto operand : root->getOperands()) {
+                       std::function<void(mlir::Operation*)> callback = {},
+                       size_t max_depth = -1) {
+  auto op_id = [](mlir::Operation* op) -> void* {
+    return op->getAbstractOperation() ? op->getAbstractOperation()->classID
+                                      : nullptr;
+  };
+  auto class_id = op_id(root.getDefiningOp());
+  std::deque<std::pair<mlir::Value, size_t>> queue;
+  queue.emplace_back(root, 0);
+
+  while (!queue.empty()) {
+    auto cur = queue.front();
+    auto operand = cur.first;
+    queue.pop_front();
     auto operand_op = operand.getDefiningOp();
-    if (!operand_op) {
+
+    // argument is leaf node
+    if (!operand_op || class_id != op_id(operand_op)) {
       leafNodes.push_back(operand);
       continue;
     }
-    auto id = operand_op->getAbstractOperation()
-                  ? operand_op->getAbstractOperation()->classID
-                  : nullptr;
-    if (id != class_id) {
-      leafNodes.push_back(operand);
+    // invoke commutative op
+    if (callback) callback(operand_op);
+    if (cur.second > max_depth) {
       continue;
     }
-    // only Commutative reach here
-    getBinaryTreeLeaf(class_id, operand.getDefiningOp(), leafNodes, callback);
+    queue.emplace_back(operand_op->getOperand(0), cur.second + 1);
+    queue.emplace_back(operand_op->getOperand(1), cur.second + 1);
   }
 }
 
@@ -358,16 +368,14 @@ struct PatternMatcher {
       llvm::SmallVector<mlir::Value, 16> lhs_operands;
       llvm::SmallVector<mlir::Value, 16> rhs_operands;
       if (isCommutative(cur.first.getDefiningOp())) {
-        getBinaryTreeLeaf(
-            cur.first.getDefiningOp()->getAbstractOperation()->classID,
-            cur.first.getDefiningOp(), lhs_operands);
+        getBinaryTreeLeaf(cur.first, lhs_operands);
         llvm::SmallVector<mlir::Operation*, 4> commutative_ops;
         getBinaryTreeLeaf(
-            cur.second.getDefiningOp()->getAbstractOperation()->classID,
-            cur.second.getDefiningOp(), rhs_operands,
+            cur.second, rhs_operands,
             [&commutative_ops](mlir::Operation* op) -> void {
               commutative_ops.push_back(op);
-            });
+            },
+            lhs_operands.size() - 1);
 
         size_t origin_operand_size = lhs_operands.size();
         // if there only one comutative op, we just visit the root node
