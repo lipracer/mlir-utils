@@ -5,8 +5,18 @@
 #include <utility>
 
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/raw_ostream.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/OpDefinition.h"
 
-
+#define TEXT_LOGW(s)
+#define TEXT_LOGW(s) \
+  do {               \
+    s;               \
+  } while (false);
 
 namespace {
 template <typename T, typename Pred>
@@ -31,16 +41,16 @@ struct ValueWrapper {
   }
 };
 
-
 // it is binary tree, we just recursion collect
 // leaf node is not commutative and not null
 void getBinaryTreeLeaf(mlir::Value root,
                        llvm::SmallVectorImpl<mlir::Value>& leafNodes,
                        std::function<void(mlir::Operation*)> callback = {},
                        size_t max_depth = -1) {
-  auto op_id = [](mlir::Operation* op) -> void* {
-    return op->getAbstractOperation() ? op->getAbstractOperation()->classID
-                                      : nullptr;
+  auto op_id = [](mlir::Operation* op) -> const void* {
+    return op->getRegisteredInfo()
+               ? op->getRegisteredInfo()->getTypeID().getAsOpaquePointer()
+               : nullptr;
   };
   auto class_id = op_id(root.getDefiningOp());
   std::deque<std::pair<mlir::Value, size_t>> queue;
@@ -70,24 +80,27 @@ void getBinaryTreeLeaf(mlir::Value root,
 // if value is argument or defin op is mlir standard op,
 // it is difficulty to sort
 struct ValueCanonicalizeLess {
-  static bool ingore(mlir::Value v) {
-    return !v.getDefiningOp();
-  }
+  static bool ingore(mlir::Value v) { return !v.getDefiningOp(); }
   // descending sort
   // E.g add(var,dot) match add(const,dot)
   //         |                   |
   //     add(dot,var)       add(dot,const)
   bool operator()(mlir::Value lhs, mlir::Value rhs) const {
-    return lhs.getDefiningOp()->getAbstractOperation()->classID <
-           rhs.getDefiningOp()->getAbstractOperation()->classID;
+    return lhs.getDefiningOp()
+               ->getRegisteredInfo()
+               ->getTypeID()
+               .getAsOpaquePointer() < rhs.getDefiningOp()
+                                           ->getRegisteredInfo()
+                                           ->getTypeID()
+                                           .getAsOpaquePointer();
   }
 };
 
 inline bool same_type_op(mlir::Operation* lhs, mlir::Operation* rhs) {
-  auto lhs_abs = lhs->getAbstractOperation();
-  auto rhs_abs = rhs->getAbstractOperation();
+  auto lhs_abs = lhs->getRegisteredInfo();
+  auto rhs_abs = rhs->getRegisteredInfo();
   if (lhs_abs && rhs_abs) {
-    return lhs_abs->classID == rhs_abs->classID;
+    return lhs_abs->getTypeID() == rhs_abs->getTypeID();
   }
   return lhs->getName() == rhs->getName();
 }
@@ -114,15 +127,13 @@ static typename std::tuple<Iterator, Iterator> canonicalizeOperand(V& lhs,
   return std::make_pair(lhs_invalid_iter, rhs_invalid_iter);
 }
 
-
-
 bool Equivalence(mlir::Operation* lhs, mlir::Operation* rhs) {
   // tuple op abstract is null
-  if (!lhs->getAbstractOperation() || !rhs->getAbstractOperation()) {
+  if (!lhs->getRegisteredInfo() || !rhs->getRegisteredInfo()) {
     return lhs->getName().getStringRef() == rhs->getName().getStringRef();
   }
-  if (lhs->getAbstractOperation()->classID !=
-      rhs->getAbstractOperation()->classID) {
+  if (lhs->getRegisteredInfo()->getTypeID() !=
+      rhs->getRegisteredInfo()->getTypeID()) {
     return false;
   }
   return true;
@@ -178,13 +189,13 @@ struct PatternMatcher {
   llvm::SmallVector<mlir::Operation*, 4> fused_ops;
   llvm::SmallVector<std::pair<mlir::Value, mlir::Value>, 4> output_values;
   llvm::DenseSet<mlir::Value> visited_set;
-  PatternMatcher * pre_matcher = nullptr;
-
-  llvm::DenseSet<mlir::Value> fused_ops_value_set;
-
   llvm::raw_ostream* log_ostream;
   size_t depth;
   bool debug;
+  PatternMatcher* pre_matcher = nullptr;
+
+  llvm::DenseSet<mlir::Value> fused_ops_value_set;
+
   PatternMatcher(llvm::ArrayRef<value_pair> r, size_t d = 0, bool dbg = false,
                  PatternMatcher* pre = nullptr)
       : roots(r.begin(), r.end()),
@@ -569,4 +580,5 @@ struct PatternMatcher {
     return true;
   }
 };
- 
+
+}  // namespace
