@@ -5,6 +5,8 @@ set(LIBS
         ${dialect_libs}
         ${conversion_libs}
         MLIROptLib
+        UtilsTransforms
+        utils
         )
 add_llvm_executable(utils-opt utils-opt.cpp)
 llvm_update_compile_flags(utils-opt)

@@ -37,7 +37,7 @@ class MemRefDialect;
 }  // end namespace memref
 
 #define GEN_PASS_CLASSES
-#include "Transforms/utils_passes.h.inc"
+#include "include/Transforms/utils_passes.h.inc"
 
 }  // end namespace mlir
 
