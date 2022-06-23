@@ -31,7 +31,6 @@ class FusionPass : public FusionPassBase<FusionPass> {
             describtor.get(), getOperation()->getContext()));
       }
     }
-    auto op = getOperation();
     if (failed(applyPatternsAndFoldGreedily(getOperation(),
                                             std::move(patterns)))) {
       return signalPassFailure();
