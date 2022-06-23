@@ -1,5 +1,5 @@
 module {
-  func @main(%arg0: tensor<1xf32>, %arg1: tensor<1xf32>, %arg2: tensor<1152x1024xf32>) -> tensor<1152x1024xf32> {
+  func.func @main(%arg0: tensor<1xf32>, %arg1: tensor<1xf32>, %arg2: tensor<1152x1024xf32>) -> tensor<1152x1024xf32> {
     %0 = arith.constant dense<1.11111116> : tensor<1xf32>
     %2 = arith.constant dense<[1152, 1024]> : tensor<2xi32>
     %4 = arith.constant dense<1.000000e-01> : tensor<1xf32>

@@ -1,16 +1,70 @@
+#include "include/graph_matcher.h"
+
 #include <deque>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <utility>
 
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
-#include "mlir/IR/Value.h"
-#include "mlir/IR/Operation.h"
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/Value.h"
+#include "mlir/Parser/Parser.h"
+
+namespace mlir {
+namespace utils {
+void PatternDescribtorManager::InitWithContext(MLIRContext* context) {
+  if (context == context_) {
+    return;
+  }
+  context_ = context;
+  pattern_describtors_.clear();
+  for (const auto& str : string_patterns_) {
+    auto module = parseSourceString<ModuleOp>(str, context);
+    pattern_describtors_.emplace_back(std::make_unique<PatternDescribtor>(
+        std::move(module), dialect_namespace_));
+  }
+}
+
+PatternDescribtorManager& PatternDescribtorManager::instance(
+    MLIRContext* context, llvm::StringRef dialect_namespace) {
+  static PatternDescribtorManager __instance;
+  __instance.dialect_namespace_ = dialect_namespace;
+  if (context) {
+    __instance.InitWithContext(context);
+  }
+  return __instance;
+}
+
+void PatternDescribtorManager::registerPatternDescribtor(
+    const std::string& str) {
+  string_patterns_.emplace_back(str);
+}
+
+struct TextPatternRegistiter {
+  TextPatternRegistiter(const std::string& str) {
+    PatternDescribtorManager::instance().registerPatternDescribtor(str);
+  }
+};
+
+static TextPatternRegistiter GeluPattern(R"(
+
+module {
+  func.func @main(%arg0: none, %arg1: none) -> none {
+    %0 = "cast"(%arg0) : (none) -> none
+    %1 = "mul"(%arg1, %0) : (none, none) -> none
+    "return"(%1) : (none) -> ()
+  }
+}
+
+)");
+
+}  // namespace utils
+}  // namespace mlir
 
 #define TEXT_LOGW(s)
 #define TEXT_LOGW(s) \
@@ -18,7 +72,7 @@
     s;               \
   } while (false);
 
-namespace {
+namespace utils {
 template <typename T, typename Pred>
 T moveToEnd(T first, T last, Pred pred) {
   auto cur = first--;
@@ -30,6 +84,11 @@ T moveToEnd(T first, T last, Pred pred) {
     ++cur;
   }
   return ++first;
+}
+
+llvm::StringRef OperationName(mlir::Operation* op) {
+  return op->isRegistered() ? op->getName().stripDialect()
+                            : op->getName().getStringRef();
 }
 
 struct ValueWrapper {
@@ -47,10 +106,8 @@ void getBinaryTreeLeaf(mlir::Value root,
                        llvm::SmallVectorImpl<mlir::Value>& leafNodes,
                        std::function<void(mlir::Operation*)> callback = {},
                        size_t max_depth = -1) {
-  auto op_id = [](mlir::Operation* op) -> const void* {
-    return op->getRegisteredInfo()
-               ? op->getRegisteredInfo()->getTypeID().getAsOpaquePointer()
-               : nullptr;
+  auto op_id = [](mlir::Operation * op) -> auto{
+    return op->getName().getStringRef();
   };
   auto class_id = op_id(root.getDefiningOp());
   std::deque<std::pair<mlir::Value, size_t>> queue;
@@ -86,13 +143,14 @@ struct ValueCanonicalizeLess {
   //         |                   |
   //     add(dot,var)       add(dot,const)
   bool operator()(mlir::Value lhs, mlir::Value rhs) const {
-    return lhs.getDefiningOp()
-               ->getRegisteredInfo()
-               ->getTypeID()
-               .getAsOpaquePointer() < rhs.getDefiningOp()
-                                           ->getRegisteredInfo()
-                                           ->getTypeID()
-                                           .getAsOpaquePointer();
+    auto lhs_op = lhs.getDefiningOp();
+    auto rhs_op = rhs.getDefiningOp();
+    if (lhs_op->isRegistered() && rhs_op->isRegistered()) {
+      return lhs_op->getRegisteredInfo()->getTypeID().getAsOpaquePointer() <
+             rhs_op->getRegisteredInfo()->getTypeID().getAsOpaquePointer();
+    } else {
+      return OperationName(lhs_op) < OperationName(rhs_op);
+    }
   }
 };
 
@@ -102,7 +160,7 @@ inline bool same_type_op(mlir::Operation* lhs, mlir::Operation* rhs) {
   if (lhs_abs && rhs_abs) {
     return lhs_abs->getTypeID() == rhs_abs->getTypeID();
   }
-  return lhs->getName() == rhs->getName();
+  return OperationName(lhs) == OperationName(rhs);
 }
 
 inline bool same_type(mlir::Value lhs, mlir::Value rhs) {
@@ -130,7 +188,7 @@ static typename std::tuple<Iterator, Iterator> canonicalizeOperand(V& lhs,
 bool Equivalence(mlir::Operation* lhs, mlir::Operation* rhs) {
   // tuple op abstract is null
   if (!lhs->getRegisteredInfo() || !rhs->getRegisteredInfo()) {
-    return lhs->getName().getStringRef() == rhs->getName().getStringRef();
+    return OperationName(lhs) == OperationName(rhs);
   }
   if (lhs->getRegisteredInfo()->getTypeID() !=
       rhs->getRegisteredInfo()->getTypeID()) {
@@ -145,7 +203,9 @@ bool Equivalence(mlir::Value lhs, mlir::Value rhs) {
 }
 
 bool isCommutative(mlir::Operation* op) {
-  return op->hasTrait<mlir::OpTrait::IsCommutative>();
+  return op->hasTrait<mlir::OpTrait::IsCommutative>() ||
+         ::mlir::utils::PatternDescribtorManager::instance().isCommutativeOp(
+             OperationName(op));
 }
 
 using value_pair = std::pair<mlir::Value, mlir::Value>;
@@ -445,8 +505,8 @@ struct PatternMatcher {
           //   mul     mul   mul    mul1
           //    \      /      \     /
           //       mul          mul
-          // we can not judge mul0 or mul1 may be matched, so we need permutate
-          // all of thems and try match
+          // we can not judge mul0 or mul1 may be matched, so we need
+          // permutate all of thems and try match
           llvm::SmallVector<PatternMatcher, 4> sub_patterns;
           auto lower_iter = lhs_sorted_operands.begin();
           while (lower_iter != lhs_sorted_operands.end()) {
@@ -581,4 +641,75 @@ struct PatternMatcher {
   }
 };
 
-}  // namespace
+using pair_value = std::pair<mlir::Value, mlir::Value>;
+
+auto sortOutputs(llvm::ArrayRef<pair_value> outputs,
+                 llvm::DenseMap<mlir::Value, size_t>& outputs_map) {
+  assert(outputs_map.size() == outputs.size() &&
+         "matched outputs size not equal declare var size!");
+  std::vector<mlir::Value> result(outputs_map.size());
+  for (auto it : outputs) {
+    result[outputs_map[it.first]] = it.second;
+  }
+  return result;
+}
+
+auto sortInputs(llvm::SmallVectorImpl<pair_value>& inputs,
+                llvm::DenseMap<mlir::Value, size_t>& inputs_map) {
+  // Parameters are always accessed multiple times, we need unique those
+  llvm::sort(inputs, [](auto lhs, auto rhs) {
+    return lhs.second.getAsOpaquePointer() < rhs.second.getAsOpaquePointer();
+  });
+  inputs.erase(std::unique(inputs.begin(), inputs.end(),
+                           [](auto lhs, auto rhs) {
+                             return lhs.second.getAsOpaquePointer() ==
+                                    rhs.second.getAsOpaquePointer();
+                           }),
+               inputs.end());
+
+  llvm::SmallVector<mlir::Value> result(inputs_map.size());
+  for (auto it : inputs) {
+    result[inputs_map[it.first]] = it.second;
+  }
+  return result;
+}
+
+}  // namespace utils
+
+namespace mlir {
+using namespace utils;
+
+LogicalResult TextFusionRewritePattern::matchAndRewrite(
+    Operation* op, PatternRewriter& rewriter) const {
+  llvm::SmallVector<::utils::pair_value, 4> roots = {
+      std::make_pair(describtor_->getRootValue(), op->getResult(0))};
+  ::utils::PatternMatcher matcher(roots, 0, /*debug*/ true);
+  bool result = matcher();
+  if (!result) {
+    return LogicalResult::failure();
+  }
+  auto fused_ops = matcher.fused_ops;
+  auto matched_input_values = matcher.input_values;
+  auto matched_output_values = matcher.output_values;
+  std::sort(fused_ops.begin(), fused_ops.end(),
+            [](auto lhs, auto rhs) { return lhs->isBeforeInBlock(rhs); });
+  fused_ops.erase(std::unique(fused_ops.begin(), fused_ops.end()),
+                  fused_ops.end());
+  auto input_values =
+      ::utils::sortInputs(matched_input_values, describtor_->inputsMap());
+  auto output_values =
+      ::utils::sortOutputs(matched_output_values, describtor_->outputsMap());
+
+  for (auto it : input_values) {
+    it.dump();
+  }
+
+  OperationState fusion_state(op->getLoc(), "fusion");
+  fusion_state.addOperands(input_values);
+  fusion_state.addTypes(op->getResult(0).getType());
+  auto new_op = rewriter.create(fusion_state);
+  rewriter.replaceOp(op, new_op->getResult(0));
+  return LogicalResult::success();
+}
+
+}  // namespace mlir

@@ -14,8 +14,9 @@ cmake -GNinja -S ./third_party/llvm-project/llvm \
     -DLLVM_ENABLE_BINDINGS=OFF \
     -DLLVM_BUILD_TOOLS=OFF \
     -DLLVM_INCLUDE_TESTS=OFF \
+    -DLLVM_ENABLE_ASSERTIONS=ON \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DCMAKE_C_COMPILER=gcc-7 \
     -DCMAKE_CXX_COMPILER=g++-7
 
-cmake --build llvm-build --target all --target mlir-cpu-runner
+cmake --build llvm-build --target all -- -j8
