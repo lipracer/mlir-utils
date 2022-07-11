@@ -13,6 +13,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/Parser/Parser.h"
 
 namespace mlir {
@@ -66,11 +67,13 @@ module {
 }  // namespace utils
 }  // namespace mlir
 
-#define TEXT_LOGW(s)
+
 #define TEXT_LOGW(s) \
   do {               \
     s;               \
   } while (false);
+
+#define TEXT_LOGW(s)
 
 namespace utils {
 template <typename T, typename Pred>
@@ -681,6 +684,9 @@ using namespace utils;
 
 LogicalResult TextFusionRewritePattern::matchAndRewrite(
     Operation* op, PatternRewriter& rewriter) const {
+  if (op->getParentOp()->getName().getStringRef() == "fusion") {
+    return LogicalResult::failure();
+  }
   llvm::SmallVector<::utils::pair_value, 4> roots = {
       std::make_pair(describtor_->getRootValue(), op->getResult(0))};
   ::utils::PatternMatcher matcher(roots, 0, /*debug*/ true);
@@ -700,14 +706,43 @@ LogicalResult TextFusionRewritePattern::matchAndRewrite(
   auto output_values =
       ::utils::sortOutputs(matched_output_values, describtor_->outputsMap());
 
-  for (auto it : input_values) {
-    it.dump();
-  }
+// Operation *clone(Operation &op, BlockAndValueMapping &mapper);
 
   OperationState fusion_state(op->getLoc(), "fusion");
   fusion_state.addOperands(input_values);
   fusion_state.addTypes(op->getResult(0).getType());
+  fusion_state.addRegion();
   auto new_op = rewriter.create(fusion_state);
+
+  auto block = new Block();
+  new_op->getRegion(0).push_back(block);
+  llvm::SmallVector<mlir::Location, 4> locs;
+  for (auto it : input_values) {
+    locs.push_back(it.getLoc());
+  }
+  block->addArguments(TypeRange(llvm::makeArrayRef(input_values)), locs);
+  BlockAndValueMapping mapper;
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(block);
+    for (auto it : llvm::enumerate(input_values)) {
+      mapper.map(it.value(), block->getArgument(it.index()));
+    }
+    for (auto op : fused_ops) {
+      auto clone_op = rewriter.clone(*op, mapper);
+      for(auto it : llvm::zip(op->getResults(), clone_op->getResults())) {
+        mapper.map(std::get<0>(it), std::get<1>(it));
+      }
+    }
+    llvm::SmallVector<mlir::Value, 4> ret_operands(output_values.size());
+    std::transform(output_values.begin(), output_values.end(),
+                   ret_operands.begin(),
+                   [&](auto it) -> Value { return mapper.lookupOrNull(it); });
+
+    OperationState fusion_state(op->getLoc(), "tosa.yield");
+    fusion_state.addOperands(ret_operands);
+    rewriter.create(fusion_state);
+  }
   rewriter.replaceOp(op, new_op->getResult(0));
   return LogicalResult::success();
 }
