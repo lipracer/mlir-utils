@@ -8,6 +8,7 @@
 
 namespace mlir {
 std::unique_ptr<Pass> createFusionPass();
+std::unique_ptr<Pass> createAutoFusionPass();
 
 namespace utils {
 #define GEN_PASS_REGISTRATION
