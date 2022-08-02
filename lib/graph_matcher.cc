@@ -720,7 +720,7 @@ LogicalResult TextFusionRewritePattern::matchAndRewrite(
   for (auto it : input_values) {
     locs.push_back(it.getLoc());
   }
-  block->addArguments(TypeRange(llvm::makeArrayRef(input_values)), locs);
+  block->addArguments(TypeRange(input_values), locs);
   BlockAndValueMapping mapper;
   {
     OpBuilder::InsertionGuard guard(rewriter);
